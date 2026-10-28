@@ -229,7 +229,7 @@ pub fn fuzz(args: FuzzArgs) -> i32 {
         jvm_classpath,
         cljr_bin,
         args.runtime_archive.clone(),
-        true, // keep AOT tmpdirs on mismatch paths is handled by artifacts; keep simple
+        false, // failure artifacts are saved under --out; tmpdirs are garbage
     ));
     let args = Arc::new(args);
     let print_lock = Arc::new(Mutex::new(()));

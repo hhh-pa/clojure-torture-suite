@@ -300,10 +300,7 @@ fn gen_int(ctx: &mut Ctx, depth: u32) -> Typed {
     } else if roll < 68 {
         // (count coll)
         let c = gen_sized(ctx, depth - 1);
-        let (lo, hi) = match c.len {
-            Some(n) => (n as i64, n as i64),
-            None => (0, 8),
-        };
+        let (lo, hi) = count_range(c.len);
         Typed::int(format!("(count {})", c.code), lo, hi)
     } else if roll < 74 {
         // (nth/get v i) on known-length vectors (seqs in interp too).
@@ -356,11 +353,31 @@ fn gen_int(ctx: &mut Ctx, depth: u32) -> Typed {
             d.hi.max(99),
         )
     } else {
-        // AOT: (get v i default) over vectors (total, any index).
-        let v = gen_vec(ctx, depth - 1);
-        let i = ctx.rng.range(0, 10);
-        let d = gen_int(ctx, depth - 1);
-        Typed::int(format!("(get {} {i} {})", v.code, d.code), d.lo, d.hi)
+        gen_vec_get_total(ctx, depth)
+    }
+}
+
+/// AOT: `(get v i default)` over vectors — total for any index, but the
+/// result may be an element (any tracked int) or the default, so the
+/// honest range spans the cap.
+fn gen_vec_get_total(ctx: &mut Ctx, depth: u32) -> Typed {
+    let v = gen_vec(ctx, depth - 1);
+    let i = ctx.rng.range(0, 10);
+    let d = gen_int(ctx, depth - 1);
+    Typed::int(
+        format!("(get {} {i} {})", v.code, d.code),
+        -RANGE_CAP,
+        RANGE_CAP,
+    )
+}
+
+/// Honest range for `(count coll)`: exact when the length is tracked,
+/// generously over-approximated otherwise (real counts stay tiny, but the
+/// range must never understate — overflow gating depends on it).
+fn count_range(len: Option<usize>) -> (i64, i64) {
+    match len {
+        Some(n) => (n as i64, n as i64),
+        None => (0, 1024),
     }
 }
 
@@ -419,7 +436,8 @@ fn gen_nth(ctx: &mut Ctx, depth: u32) -> Typed {
                 } else {
                     "nth"
                 };
-                return Typed::int(format!("({op} {} {i})", v.code), -200, 200);
+                // Elements are arbitrary tracked ints: span the cap.
+                return Typed::int(format!("({op} {} {i})", v.code), -RANGE_CAP, RANGE_CAP);
             }
         }
     }
@@ -1642,6 +1660,53 @@ mod tests {
         for seed in 1..=20 {
             let p = generate_program(GenMode::Interp, seed, 4);
             assert!(p.contains("(prn ["), "seed {seed}:\n{p}");
+        }
+    }
+
+    fn test_ctx(seed: u64, mode: GenMode) -> Ctx {
+        Ctx {
+            rng: Rng(seed.wrapping_add(0x9E3779B97F4A7C15)),
+            mode,
+            max_depth: 4,
+            vars: Vec::new(),
+            fns: Vec::new(),
+            var_counter: 0,
+            fn_counter: 0,
+            fuel: 400,
+        }
+    }
+
+    /// Tracked ranges must be exact or span the cap — never a narrow band
+    /// the real value can escape (overflow gating depends on it).
+    fn assert_honest(e: &Typed, what: &str) {
+        assert!(
+            e.lo == e.hi || (e.lo, e.hi) == (-RANGE_CAP, RANGE_CAP),
+            "{what}: dishonest range [{}, {}] in {}",
+            e.lo,
+            e.hi,
+            e.code
+        );
+    }
+
+    #[test]
+    fn nth_range_is_honest() {
+        for seed in 1..=50 {
+            let mut ctx = test_ctx(seed, GenMode::Interp);
+            assert_honest(&gen_nth(&mut ctx, 4), "gen_nth");
+        }
+    }
+
+    #[test]
+    fn count_range_honest() {
+        assert_eq!(count_range(Some(3)), (3, 3));
+        assert_eq!(count_range(None), (0, 1024));
+    }
+
+    #[test]
+    fn vec_get_total_range_is_honest() {
+        for seed in 1..=50 {
+            let mut ctx = test_ctx(seed, GenMode::Aot);
+            assert_honest(&gen_vec_get_total(&mut ctx, 4), "gen_vec_get_total");
         }
     }
 }

@@ -146,13 +146,16 @@ impl Outcome {
     }
 }
 
+/// Process-global staging-dir counter: per-instance counters collide when
+/// several `Backends` share a process (and unit tests do exactly that).
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Backend executors shared by `run` and `fuzz`.
 pub struct Backends {
     pub jvm_classpath: Option<String>,
     pub cljr_bin: Option<String>,
     pub runtime_archive: Option<PathBuf>,
     pub keep_tmp: bool,
-    tmp_counter: AtomicU64,
 }
 
 impl Backends {
@@ -167,7 +170,6 @@ impl Backends {
             cljr_bin,
             runtime_archive,
             keep_tmp,
-            tmp_counter: AtomicU64::new(0),
         }
     }
 
@@ -216,7 +218,7 @@ impl Backends {
     /// `clojure-rs build <file> -o <tmpbin>` then execute it.
     /// Returns (build outcome, run outcome or None when the build failed).
     pub fn run_cljr_aot(&self, file: &Path, timeout: Duration) -> (Outcome, Option<Outcome>) {
-        let id = self.tmp_counter.fetch_add(1, Ordering::SeqCst);
+        let id = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
         let tmpdir = std::env::temp_dir().join(format!("torture-aot-{}-{id}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmpdir);
         let binary = tmpdir.join("torture-bin");
@@ -248,6 +250,10 @@ impl Backends {
 }
 
 /// Run a command with a timeout. Returns (exit code, stdout, stderr, timed out).
+///
+/// Pipes drain on reader threads from spawn: reading only after exit
+/// deadlocks against the 64KB pipe buffer (child blocks, parent polls,
+/// timeout misfires on programs that would have finished).
 fn run_cmd(argv: &[String], timeout: Duration) -> (Option<i32>, Vec<u8>, Vec<u8>, bool) {
     let mut child = match Command::new(&argv[0])
         .args(&argv[1..])
@@ -258,27 +264,35 @@ fn run_cmd(argv: &[String], timeout: Duration) -> (Option<i32>, Vec<u8>, Vec<u8>
         Ok(child) => child,
         Err(e) => return (None, Vec::new(), e.to_string().into_bytes(), false),
     };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let out_handle = std::thread::spawn(|| read_all(stdout));
+    let err_handle = std::thread::spawn(|| read_all(stderr));
     let start = Instant::now();
-    loop {
+    let (code, timed_out) = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let out = read_all(child.stdout.take());
-                let err = read_all(child.stderr.take());
-                return (status.code(), out, err, false);
-            }
+            Ok(Some(status)) => break (status.code(), false),
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let out = read_all(child.stdout.take());
-                    let err = read_all(child.stderr.take());
-                    return (None, out, err, true);
+                    break (None, true);
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err(e) => return (None, Vec::new(), e.to_string().into_bytes(), false),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_handle.join();
+                let _ = err_handle.join();
+                return (None, Vec::new(), e.to_string().into_bytes(), false);
+            }
         }
-    }
+    };
+    // Exited or killed: pipes hit EOF and the readers finish.
+    let out = out_handle.join().unwrap_or_default();
+    let err = err_handle.join().unwrap_or_default();
+    (code, out, err, timed_out)
 }
 
 fn read_all<R: std::io::Read>(pipe: Option<R>) -> Vec<u8> {
@@ -307,12 +321,17 @@ fn is_executable(p: &Path) -> bool {
     if !p.is_file() {
         return false;
     }
-    p.metadata()
-        .map(|m| {
-            use std::os::unix::fs::PermissionsExt;
-            m.permissions().mode() & 0o111 != 0
-        })
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        p.metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn abs_str(p: &Path) -> String {
@@ -889,4 +908,101 @@ pub(crate) fn find_jars(jars_dir: &Path) -> Option<String> {
         .canonicalize()
         .unwrap_or_else(|_| jars_dir.to_path_buf());
     Some(format!("{}/*", abs.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn which_missing() {
+        assert!(which("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_cmd_large_output() {
+        // >64KB pipe buffer: must complete, not deadlock into a timeout.
+        let (code, out, _err, timed_out) = run_cmd(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "yes | head -c 200000".to_string(),
+            ],
+            Duration::from_secs(20),
+        );
+        assert!(!timed_out, "large output must not time out");
+        assert_eq!(code, Some(0));
+        assert_eq!(out.len(), 200000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_cmd_timeout_kills() {
+        let (_code, _out, _err, timed_out) = run_cmd(
+            &["sh".to_string(), "-c".to_string(), "sleep 30".to_string()],
+            Duration::from_secs(2),
+        );
+        assert!(timed_out);
+    }
+
+    /// Count this process's AOT staging dirs (pid-scoped, race-free).
+    #[cfg(unix)]
+    fn aot_tmpdirs() -> usize {
+        let prefix = format!("torture-aot-{}-", std::process::id());
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aot_tmpdir_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        // Stub clojure-rs: `build` writes an executable shell script.
+        let dir = std::env::temp_dir().join(format!("clj-torture-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let stub = dir.join("fake-cljrs");
+        std::fs::write(&stub, "#!/bin/sh\nif [ \"$1\" = build ]; then printf '#!/bin/sh\\necho hi\\n' > \"$4\"; chmod +x \"$4\"; fi\n")
+            .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = dir.join("p.clj");
+        std::fs::write(&file, "(print 1)").unwrap();
+
+        let keep = Backends::new(None, Some(stub.to_string_lossy().into_owned()), None, true);
+        let before = aot_tmpdirs();
+        let (_build, run) = keep.run_cljr_aot(&file, Duration::from_secs(20));
+        assert_eq!(run.unwrap().stdout, b"hi\n");
+        assert_eq!(
+            aot_tmpdirs(),
+            before + 1,
+            "keep_tmp=true must retain the staging dir"
+        );
+
+        let drop = Backends::new(None, Some(stub.to_string_lossy().into_owned()), None, false);
+        let before = aot_tmpdirs();
+        let (_build, run) = drop.run_cljr_aot(&file, Duration::from_secs(20));
+        assert_eq!(run.unwrap().stdout, b"hi\n");
+        assert_eq!(
+            aot_tmpdirs(),
+            before,
+            "keep_tmp=false must remove the staging dir"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        // Best-effort cleanup of the retained dir from the keep arm.
+        let prefix = format!("torture-aot-{}-", std::process::id());
+        if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+            for e in entries.flatten() {
+                if e.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+    }
 }

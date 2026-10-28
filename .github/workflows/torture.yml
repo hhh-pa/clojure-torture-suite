@@ -39,9 +39,10 @@ jobs:
         with:
           repository: hhh-pa/clojure
           path: upstream
-      - uses: ./upstream/.github/actions/profile-runner
-        with:
-          cache-key: runner-profile-${{ runner.os }}-torture
+      # NOTE: upstream's profile-runner action is intentionally not reused:
+      # it reads scripts/ci/go/go.mod relative to the calling repo, which
+      # breaks cross-checkout, and runner hardware profiling is irrelevant
+      # to torture. setup-llvm is path-clean and safe to reuse.
       - uses: ./upstream/.github/actions/setup-llvm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

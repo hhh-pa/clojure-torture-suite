@@ -69,7 +69,10 @@ impl Default for Directives {
 
 fn dg_pattern() -> &'static Regex {
     static CELL: OnceLock<Regex> = OnceLock::new();
-    CELL.get_or_init(|| Regex::new(r"\{\s*(dg-[a-z-]+)\s*(.*?)\s*\}").unwrap())
+    // Quoted values may contain `}` (escapes honored); bare values may not.
+    CELL.get_or_init(|| {
+        Regex::new(r#"\{\s*(dg-[a-z-]+)\s*("(?:[^"\\]|\\.)*"|[^{}]*?)\s*\}"#).unwrap()
+    })
 }
 
 /// Interpret C escapes (`\n \t \r \\ \" \0`; unknown escapes keep the char).
@@ -167,6 +170,9 @@ fn check_backend(name: &str, path: &str, directive: &str) -> Result<(), String> 
 
 pub fn parse_str(path: &str, text: &str) -> Result<Directives, String> {
     let mut d = Directives::default();
+    // Scalar directives must appear at most once; the list directives
+    // (dg-xfail-backend, dg-skip-backend) accumulate across lines.
+    let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
     for line in text.lines() {
         let stripped = line.trim();
         if !(stripped.is_empty() || stripped.starts_with(';')) {
@@ -175,6 +181,21 @@ pub fn parse_str(path: &str, text: &str) -> Result<Directives, String> {
         for cap in dg_pattern().captures_iter(line) {
             let name = &cap[1];
             let value = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            let scalar: Option<&'static str> = match name {
+                "dg-do" => Some("dg-do"),
+                "dg-mode" => Some("dg-mode"),
+                "dg-output" => Some("dg-output"),
+                "dg-output-re" => Some("dg-output-re"),
+                "dg-error-re" => Some("dg-error-re"),
+                "dg-timeout" => Some("dg-timeout"),
+                "dg-args" => Some("dg-args"),
+                _ => None,
+            };
+            if let Some(key) = scalar {
+                if !seen.insert(key) {
+                    return Err(format!("{path}: duplicate directive {name}"));
+                }
+            }
             match name {
                 "dg-do" => {
                     d.do_what = match value.trim() {
@@ -304,5 +325,28 @@ mod tests {
     #[test]
     fn unescape_cases() {
         assert_eq!(c_unescape("A\\nB\\t\\\\\\\""), "A\nB\t\\\"");
+    }
+
+    #[test]
+    fn output_with_brace() {
+        let d = parse_str("t.clj", ";; { dg-output \"a}b\\n\" }\n").unwrap();
+        assert_eq!(d.output, Some(b"a}b\n".to_vec()));
+    }
+
+    #[test]
+    fn duplicate_scalar_directive_errors() {
+        assert!(parse_str("t.clj", ";; { dg-do run }\n;; { dg-do load }\n").is_err());
+        assert!(parse_str("t.clj", ";; { dg-timeout 5 }\n;; { dg-timeout 6 }\n").is_err());
+        assert!(parse_str("t.clj", ";; { dg-output \"a\" }\n;; { dg-output \"b\" }\n").is_err());
+    }
+
+    #[test]
+    fn list_directives_accumulate() {
+        let d = parse_str(
+            "t.clj",
+            ";; { dg-xfail-backend jvm }\n;; { dg-xfail-backend clojure-rs }\n",
+        )
+        .unwrap();
+        assert_eq!(d.xfail, vec!["jvm".to_string(), "clojure-rs".to_string()]);
     }
 }
