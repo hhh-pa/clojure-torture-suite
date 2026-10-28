@@ -1,0 +1,2 @@
+# Oracle jars live here (gitignored). Fetch with:
+#   ./scripts/fetch-clojure-jars.sh

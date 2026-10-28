@@ -1,0 +1,10 @@
+[package]
+name = "clj-torture"
+version = "0.1.0"
+edition = "2021"
+description = "Clojure torture suite: corpus runner, program generator, and differential fuzzer"
+license = "EPL-1.0"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+regex = "1"

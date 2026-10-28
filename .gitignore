@@ -1,0 +1,6 @@
+results.sum
+fuzz-out/
+__pycache__/
+harness/lib/*.jar
+!harness/lib/.gitkeep
+harness/target/
