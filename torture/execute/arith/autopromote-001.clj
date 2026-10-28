@@ -1,6 +1,5 @@
 ;; Auto-promoting +'/-'/*' (out of scope on the port: no BigInt promotion).
 ;; { dg-do run }
-;; { dg-xfail-backend clojure-rs }
 ;; { dg-output "TORTURE-PASS\n" }
 
 (assert (= (+' 9223372036854775807 1) 9223372036854775808N))

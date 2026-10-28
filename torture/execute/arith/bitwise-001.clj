@@ -1,6 +1,5 @@
 ;; Bitwise lattice (out of scope on the port: extended-arith slice).
 ;; { dg-do run }
-;; { dg-xfail-backend clojure-rs }
 ;; { dg-output "TORTURE-PASS\n" }
 
 (assert (= (bit-and 12 10) 8))

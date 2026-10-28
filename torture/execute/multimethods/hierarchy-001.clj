@@ -1,6 +1,5 @@
 ;; Hierarchy-aware dispatch needs derive/isa? (port slice S13, out of scope).
 ;; { dg-do run }
-;; { dg-xfail-backend clojure-rs }
 ;; { dg-output "TORTURE-PASS\n" }
 
 (derive ::rect ::shape)
