@@ -50,11 +50,64 @@ pub struct FuzzArgs {
     /// Keep passing programs too (default: keep failures only)
     #[arg(long)]
     pub keep_pass: bool,
+    /// Seeds expected to fail (known upstream findings), e.g. "2,10,11"
+    #[arg(long, default_value = "")]
+    pub xfail_seeds: String,
+    /// Fail the run if an expected-failure seed passes (forces unpinning)
+    #[arg(long)]
+    pub strict_xpass: bool,
+}
+
+/// Parse a comma/whitespace-separated seed list like "2, 10,11".
+pub fn parse_seed_list(s: &str) -> Result<std::collections::HashSet<u64>, String> {
+    let mut out = std::collections::HashSet::new();
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(out);
+    }
+    for tok in trimmed.split(|c: char| c == ',' || c.is_whitespace()) {
+        if tok.is_empty() {
+            continue;
+        }
+        match tok.parse::<u64>() {
+            Ok(n) => {
+                out.insert(n);
+            }
+            Err(_) => return Err(format!("bad seed '{tok}' in --xfail-seeds (want u64 list)")),
+        }
+    }
+    Ok(out)
 }
 
 struct SeedResult {
     passed: bool,
     detail: String,
+}
+
+/// DejaGNU-style verdict for one fuzzed seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Pass,
+    XPass,
+    XFail,
+    Fail,
+}
+
+fn classify_seed(passed: bool, expected_failure: bool) -> Verdict {
+    match (passed, expected_failure) {
+        (true, false) => Verdict::Pass,
+        (true, true) => Verdict::XPass,
+        (false, true) => Verdict::XFail,
+        (false, false) => Verdict::Fail,
+    }
+}
+
+fn fuzz_exit_code(n_failed: usize, n_xpass: usize, strict_xpass: bool) -> i32 {
+    if n_failed == 0 && (n_xpass == 0 || !strict_xpass) {
+        0
+    } else {
+        1
+    }
 }
 
 fn write_artifact(out_dir: &Path, seed: u64, suffix: &str, bytes: &[u8]) {
@@ -231,38 +284,70 @@ pub fn fuzz(args: FuzzArgs) -> i32 {
         args.runtime_archive.clone(),
         false, // failure artifacts are saved under --out; tmpdirs are garbage
     ));
+    let xfail = match parse_seed_list(&args.xfail_seeds) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let xfail = Arc::new(xfail);
     let args = Arc::new(args);
     let print_lock = Arc::new(Mutex::new(()));
     let seeds: Vec<u64> = (args.start_seed..args.start_seed + args.count).collect();
     let n_threads = args.jobs.max(1).min(seeds.len().max(1));
     let failed: Arc<Mutex<Vec<SeedResult>>> = Arc::new(Mutex::new(Vec::new()));
+    let n_xfail: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let n_xpass: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let mut handles = Vec::new();
     for tid in 0..n_threads {
         let backends = Arc::clone(&backends);
         let args = Arc::clone(&args);
+        let xfail = Arc::clone(&xfail);
         let print_lock = Arc::clone(&print_lock);
         let failed = Arc::clone(&failed);
+        let n_xfail = Arc::clone(&n_xfail);
+        let n_xpass = Arc::clone(&n_xpass);
         let seeds = seeds.clone();
         handles.push(std::thread::spawn(move || {
             let mut i = tid;
             while i < seeds.len() {
                 let seed = seeds[i];
                 let r = fuzz_seed(&backends, &args, mode, seed);
+                let expected = xfail.contains(&seed);
                 {
                     let _guard = print_lock.lock().unwrap();
-                    if r.passed {
-                        println!("PASS: seed {seed}");
-                    } else {
-                        println!("FAIL: seed {seed}: {}", r.detail);
-                        println!(
-                            "  repro: clj-torture generate --mode {} --seed {seed} --out /tmp/repro",
-                            args.mode
-                        );
-                        println!("  program: {}", args.out.join(format!("seed-{seed}.clj")).display());
+                    match classify_seed(r.passed, expected) {
+                        Verdict::Pass => println!("PASS: seed {seed}"),
+                        Verdict::XPass => {
+                            println!("XPASS: seed {seed} (expected failure; unpin it)");
+                            *n_xpass.lock().unwrap() += 1;
+                        }
+                        Verdict::XFail => {
+                            println!("XFAIL: seed {seed}: {}", r.detail);
+                            println!(
+                                "  repro: clj-torture generate --mode {} --seed {seed} --out /tmp/repro",
+                                args.mode
+                            );
+                            println!(
+                                "  program: {}",
+                                args.out.join(format!("seed-{seed}.clj")).display()
+                            );
+                            *n_xfail.lock().unwrap() += 1;
+                        }
+                        Verdict::Fail => {
+                            println!("FAIL: seed {seed}: {}", r.detail);
+                            println!(
+                                "  repro: clj-torture generate --mode {} --seed {seed} --out /tmp/repro",
+                                args.mode
+                            );
+                            println!(
+                                "  program: {}",
+                                args.out.join(format!("seed-{seed}.clj")).display()
+                            );
+                            failed.lock().unwrap().push(r);
+                        }
                     }
-                }
-                if !r.passed {
-                    failed.lock().unwrap().push(r);
                 }
                 i += n_threads;
             }
@@ -272,11 +357,56 @@ pub fn fuzz(args: FuzzArgs) -> i32 {
         let _ = h.join();
     }
     let failed = failed.lock().unwrap();
+    let n_xfail = *n_xfail.lock().unwrap();
+    let n_xpass = *n_xpass.lock().unwrap();
     println!("# fuzzed seeds\t\t{}", seeds.len());
     println!("# mismatches\t\t{}", failed.len());
-    if failed.is_empty() {
-        0
-    } else {
-        1
+    println!("# expected failures\t{n_xfail}");
+    println!("# unexpected passes\t{n_xpass}");
+    fuzz_exit_code(failed.len(), n_xpass, args.strict_xpass)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_seed_list;
+
+    #[test]
+    fn seed_list_empty_is_empty() {
+        assert!(parse_seed_list("").unwrap().is_empty());
+        assert!(parse_seed_list("   ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn seed_list_parses_commas_and_spaces() {
+        let s = parse_seed_list("2,10, 11 ,2").unwrap();
+        assert_eq!(s.len(), 3);
+        assert!(s.contains(&2) && s.contains(&10) && s.contains(&11));
+    }
+
+    #[test]
+    fn seed_list_rejects_garbage() {
+        assert!(parse_seed_list("2,x").is_err());
+        assert!(parse_seed_list("1-3").is_err());
+        assert!(parse_seed_list("-1").is_err());
+    }
+
+    #[test]
+    fn classify_covers_all_four_verdicts() {
+        use super::{classify_seed, Verdict};
+        assert_eq!(classify_seed(true, false), Verdict::Pass);
+        assert_eq!(classify_seed(true, true), Verdict::XPass);
+        assert_eq!(classify_seed(false, true), Verdict::XFail);
+        assert_eq!(classify_seed(false, false), Verdict::Fail);
+    }
+
+    #[test]
+    fn exit_code_rules() {
+        use super::fuzz_exit_code;
+        assert_eq!(fuzz_exit_code(0, 0, false), 0);
+        assert_eq!(fuzz_exit_code(0, 0, true), 0);
+        assert_eq!(fuzz_exit_code(0, 2, false), 0);
+        assert_eq!(fuzz_exit_code(0, 2, true), 1);
+        assert_eq!(fuzz_exit_code(1, 0, false), 1);
+        assert_eq!(fuzz_exit_code(1, 3, true), 1);
     }
 }

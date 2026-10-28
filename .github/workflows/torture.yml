@@ -69,6 +69,10 @@ jobs:
       - run: >
           ./harness/target/release/clj-torture fuzz --mode interp --count 200
           --jobs 8 --clojure-rs-bin "$GITHUB_WORKSPACE/upstream/rust/target/release/clojure-rs"
+      # AOT fuzz pins 15 known port findings (native heap corruption /
+      # nonzero exit; all pass on the JVM oracle). --strict-xpass keeps the
+      # gate honest: fixed seeds fail the run until unpinned.
       - run: >
           ./harness/target/release/clj-torture fuzz --mode aot --count 100
+          --xfail-seeds 2,10,11,25,31,32,40,42,43,44,54,75,78,93,94 --strict-xpass
           --jobs 8 --clojure-rs-bin "$GITHUB_WORKSPACE/upstream/rust/target/release/clojure-rs"

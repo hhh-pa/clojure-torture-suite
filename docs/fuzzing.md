@@ -82,6 +82,28 @@ breaks a rule, the generator is wrong); (3) file against
 [hhh-pa/clojure](https://github.com/hhh-pa/clojure) with the seed, or fix
 `gen.rs` and add a regression shape test.
 
+## Pinning known findings
+
+Confirmed port bugs stay green in CI via `--xfail-seeds`, the fuzz
+equivalent of the corpus `dg-xfail-backend` marker:
+
+```sh
+clj-torture fuzz --mode aot --count 100 \
+  --xfail-seeds 2,10,11,25,31,32,40,42,43,44,54,75,78,93,94 --strict-xpass
+```
+
+Pinned seeds that still fail print `XFAIL` and keep their artifacts;
+pinned seeds that start passing print `XPASS` and fail the run under
+`--strict-xpass`, forcing the pin's removal on convergence. Unlisted
+seeds keep the old rule: any mismatch fails the run. As with corpus
+xfails, only pin seeds whose programs pass on the JVM oracle — a seed
+that fails on JVM is a generator bug, not a port finding.
+
+Currently pinned (AOT mode, seeds 1–100): the 15 seeds above. All pass
+on JVM; on the port the AOT binary exits nonzero, with seeds 31 and 78
+additionally printing `free(): invalid pointer` (native heap
+corruption). Re-minimize and file upstream before unpinning.
+
 ## Growing the subset
 
 The generator deliberately covers less than the language. To add a form:
