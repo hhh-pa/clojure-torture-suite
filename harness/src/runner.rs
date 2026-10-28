@@ -685,6 +685,12 @@ fn check_diff(results: &[JobResult], tests: &[Test]) -> Vec<(String, Vec<String>
         if !do_what.expect_zero() {
             continue;
         }
+        if do_what == DoWhat::Load {
+            // Load tests assert exit codes only (like GCC compile tests):
+            // backends legitimately print different amounts while loading
+            // (clojure-rs run echoes the last non-nil top-level value).
+            continue;
+        }
         let mut outs: BTreeMap<Vec<u8>, Vec<String>> = BTreeMap::new();
         for r in group {
             if r.status == "PASS" || r.status == "XPASS" {
@@ -958,6 +964,46 @@ mod tests {
                     .count()
             })
             .unwrap_or(0)
+    }
+
+    fn diff_fixture(do_what: DoWhat) -> (Vec<Test>, Vec<JobResult>) {
+        let mut directives = Directives::default();
+        directives.do_what = do_what;
+        let tests = vec![Test {
+            path: PathBuf::from("t.clj"),
+            rel: "t.clj".into(),
+            directives,
+        }];
+        let mk = |backend: &str, stdout: &[u8]| JobResult {
+            status: "PASS",
+            label: format!("t.clj ({backend}/interp)"),
+            rel: "t.clj".into(),
+            backend: backend.into(),
+            instance: "interp".into(),
+            reason: String::new(),
+            detail: Detail {
+                cmd: Vec::new(),
+                stdout: stdout.to_vec(),
+                stderr: Vec::new(),
+                note: None,
+            },
+        };
+        let results = vec![mk("jvm", b"a"), mk("clojure-rs", b"b")];
+        (tests, results)
+    }
+
+    #[test]
+    fn diff_ignores_load_tests() {
+        // Load tests assert exit codes only (like GCC compile tests);
+        // backends legitimately print different amounts while loading.
+        let (tests, results) = diff_fixture(DoWhat::Load);
+        assert!(check_diff(&results, &tests).is_empty());
+    }
+
+    #[test]
+    fn diff_flags_run_tests() {
+        let (tests, results) = diff_fixture(DoWhat::Run);
+        assert_eq!(check_diff(&results, &tests).len(), 1);
     }
 
     #[cfg(unix)]

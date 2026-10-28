@@ -1,5 +1,8 @@
 ;; definterface + deftype with Type. construction and .method call.
+;; Port: deftype methods cannot see fields as locals
+;; ("Unable to resolve symbol: fname").
 ;; { dg-do run }
+;; { dg-xfail-backend clojure-rs }
 ;; { dg-output "TORTURE-PASS\n" }
 
 (definterface Greeter (greet []))

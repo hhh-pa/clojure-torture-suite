@@ -63,8 +63,9 @@ a differential mismatch on such a test is a test bug, not a port bug.
 ## Oracle discipline
 
 JVM Clojure is the specification. When the port deliberately diverges
-(no ratios, checked-i64 arithmetic, …), the torture
-test asserts **JVM behavior** and carries `dg-xfail-backend clojure-rs`
+(unchecked or higher-precision arithmetic, unimplemented vars like the
+bitwise lattice, …), the torture test asserts **JVM behavior** and
+carries `dg-xfail-backend clojure-rs`
 with a comment naming the divergence. If the port later converges, the
 test flips to `XPASS` and `--strict-xpass` (on in CI for the port job)
 forces someone to drop the marker. Never write a test that asserts

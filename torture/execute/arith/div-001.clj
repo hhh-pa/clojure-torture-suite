@@ -1,6 +1,5 @@
-;; JVM integer division yields exact ratios; the port does double division.
+;; Integer division yields exact ratios on both backends.
 ;; { dg-do run }
-;; { dg-xfail-backend clojure-rs }
 ;; { dg-output "TORTURE-PASS\n" }
 
 (assert (= (/ 1 2) 1/2))

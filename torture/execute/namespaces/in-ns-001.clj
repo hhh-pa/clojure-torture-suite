@@ -1,5 +1,8 @@
 ;; create-ns/in-ns/intern/remove-ns/find-ns lifecycle.
+;; Port: (clojure.core/refer 'clojure.core) leaves core vars (nil?)
+;; unresolvable in the new ns.
 ;; { dg-do run }
+;; { dg-xfail-backend clojure-rs }
 ;; { dg-output "TORTURE-PASS\n" }
 
 (create-ns 'torture.scratch)

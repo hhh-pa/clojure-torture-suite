@@ -81,11 +81,12 @@ should declare headroom.
   no meaning on the native port).
 
 ```clojure
-;; Ratio literals: the port has no ratios (documented divergence).
+;; Auto-promoting arithmetic: out of scope on the port (documented gap).
 ;; { dg-do run }
 ;; { dg-xfail-backend clojure-rs }
-;; { dg-output "1/2\n" }
-(println (/ 1 2))
+;; { dg-output "TORTURE-PASS\n" }
+(assert (= (+' 9223372036854775807 1) 9223372036854775808N))
+(println "TORTURE-PASS")
 ```
 
 ## `dg-args`
