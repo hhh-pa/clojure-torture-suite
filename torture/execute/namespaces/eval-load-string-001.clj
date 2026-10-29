@@ -1,7 +1,6 @@
 ;; eval, load-string, and read-string round-trip.
 ;; Port: load-string over multiple forms does not return the last value.
 ;; { dg-do run }
-;; { dg-xfail-backend clojure-rs }
 ;; { dg-output "TORTURE-PASS\n" }
 
 (assert (= (eval '(+ 1 2)) 3))

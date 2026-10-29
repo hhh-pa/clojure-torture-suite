@@ -2,7 +2,6 @@
 ;; Port: "Syntax error macroexpanding reify: Don't know how to create
 ;; ISeq from: clojure.lang.Symbol".
 ;; { dg-do run }
-;; { dg-xfail-backend clojure-rs }
 ;; { dg-output "TORTURE-PASS\n" }
 
 (defprotocol R (rval [x y]))
